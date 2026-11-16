@@ -19,6 +19,10 @@ var sheetCmd = &cobra.Command{Use: "sheet", Short: "Read and edit one Google She
 var (
 	sheetSetCSV    string
 	sheetAppendCSV string
+	getCols        []string
+	getWhere       []string
+	getLimit       int
+	getRecords     bool
 )
 
 var sheetGetCmd = &cobra.Command{
@@ -30,7 +34,19 @@ With a range, the range goes to Google untouched (e.g. Sheet1!A1:D20).
 With no range and a #gid in the link, gws reads that tab whole.
 With no range and no gid, gws reads the first tab and names it on stderr.
 
---json prints the raw ValueRange instead of CSV.`,
+--json prints the raw ValueRange instead of CSV.
+
+--cols, --where, --limit and --records read the tab by its header row and
+return only what they pick. They take no range; use --tab for another tab.
+
+  gws sheet get <link> --cols "Task ID,Status" --where Status=Todo
+  gws sheet get <link> --where "Repo~=pwa" --where "Status!=Done" --limit 5
+  gws sheet get <link> --cols "Task ID,Notes" --records
+
+--where takes <header>=<v> (exact), <header>!=<v> (not equal) or <header>~=<v>
+(substring); all match case-insensitively and every --where must hold.
+--records, or --json with a pick flag, prints one JSON object per row in
+column order, with its sheet row in "_row" and the empty cells left out.`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runSheetGet,
 }
@@ -73,6 +89,10 @@ var sheetAddTabCmd = &cobra.Command{
 func init() {
 	sheetSetCmd.Flags().StringVar(&sheetSetCSV, "csv", "", "values to write: a literal CSV string, @file, or - for stdin (required)")
 	sheetAppendCmd.Flags().StringVar(&sheetAppendCSV, "csv", "", "values to append: a literal CSV string, @file, or - for stdin (required)")
+	sheetGetCmd.Flags().StringArrayVar(&getCols, "cols", nil, "columns to print, by header or letter, comma-separated or repeated")
+	sheetGetCmd.Flags().StringArrayVar(&getWhere, "where", nil, "<header>=<v>, !=<v> or ~=<v> that a row must meet; repeatable, all must hold")
+	sheetGetCmd.Flags().IntVar(&getLimit, "limit", 0, "print at most this many rows (0 = all)")
+	sheetGetCmd.Flags().BoolVar(&getRecords, "records", false, "print JSON objects keyed by header, one per row")
 	_ = sheetSetCmd.MarkFlagRequired("csv")
 	_ = sheetAppendCmd.MarkFlagRequired("csv")
 
@@ -85,6 +105,12 @@ func runSheetGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(getCols) > 0 || len(getWhere) > 0 || getLimit != 0 || getRecords {
+		if len(args) == 2 {
+			return fmt.Errorf("--cols, --where, --limit and --records read a whole tab by its headers: drop the range, and use --tab to pick the tab")
+		}
+		return runSheetGetPicked(ref)
+	}
 	c := ctx()
 	svc, err := gsvc.Sheets(c)
 	if err != nil {
@@ -95,6 +121,8 @@ func runSheetGet(cmd *cobra.Command, args []string) error {
 	switch {
 	case len(args) == 2:
 		rangeStr = args[1]
+	case lookupTab != "":
+		rangeStr = quoteTab(lookupTab)
 	default:
 		ss, err := svc.Spreadsheets.Get(ref.ID).Fields("sheets.properties").Context(c).Do()
 		if err != nil {
@@ -120,6 +148,50 @@ func runSheetGet(cmd *cobra.Command, args []string) error {
 		return printJSON(vr)
 	}
 	return writeCSV(vr.Values)
+}
+
+func runSheetGetPicked(ref glink.Ref) error {
+	if getLimit < 0 {
+		return fmt.Errorf("--limit must be 0 or more")
+	}
+	g, err := loadGrid(ref)
+	if err != nil {
+		return err
+	}
+	cols, err := g.cols(getCols)
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		cols = g.allCols()
+	}
+	conds, err := parseConds(g, getWhere)
+	if err != nil {
+		return err
+	}
+	rows := g.filter(conds, getLimit)
+
+	if jsonOut || getRecords {
+		out := make([]obj, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, g.record(r, cols))
+		}
+		return printJSON(out)
+	}
+	table := make([][]any, 0, len(rows)+1)
+	head := make([]any, len(cols))
+	for i, c := range cols {
+		head[i] = g.headerName(c)
+	}
+	table = append(table, head)
+	for _, r := range rows {
+		line := make([]any, len(cols))
+		for i, c := range cols {
+			line[i] = g.cell(r, c)
+		}
+		table = append(table, line)
+	}
+	return writeCSV(table)
 }
 
 func runSheetSet(cmd *cobra.Command, args []string) error {

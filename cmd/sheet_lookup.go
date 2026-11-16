@@ -19,8 +19,11 @@ var (
 	findValue       string
 	findContains    bool
 	findShow        []string
-	cellWhere       string
-	cellCol         string
+	findCols        []string
+	findWhere       []string
+	findLimit       int
+	cellWhere       []string
+	cellCol         []string
 	cellSet         string
 	cellForce       bool
 	tallyCol        string
@@ -35,9 +38,21 @@ var sheetColsCmd = &cobra.Command{
 
 var sheetFindCmd = &cobra.Command{
 	Use:   "find <link> --col <header|letter> --value <text>",
-	Short: "Find the rows whose column holds a value, and print their A1 addresses",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runSheetFind,
+	Short: "Find the rows whose column holds a value, and print their row numbers",
+	Long: `Find the rows whose column holds a value, and print their row numbers.
+
+--col with --value is one condition; --where adds more, and every condition
+must hold. --where takes <header>=<v>, <header>!=<v> or <header>~=<v>.
+
+  gws sheet find <link> --col Status --value Todo --show "Task name"
+  gws sheet find <link> --where Status=Todo --where "Repo~=pwa" --cols "Task ID,Task name"
+
+The table prints ROW and the --show/--cols columns, or the matched columns
+when none is named. A cell is cut at 60 characters only on a terminal and
+without --full. --json prints the --show/--cols columns, or every column when
+none is named, and leaves the empty cells out.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSheetFind,
 }
 
 var sheetCellCmd = &cobra.Command{
@@ -66,19 +81,22 @@ var sheetTallyCmd = &cobra.Command{
 }
 
 func init() {
-	for _, c := range []*cobra.Command{sheetColsCmd, sheetFindCmd, sheetCellCmd, sheetTallyCmd} {
+	for _, c := range []*cobra.Command{sheetColsCmd, sheetFindCmd, sheetCellCmd, sheetTallyCmd, sheetGetCmd} {
 		c.Flags().StringVar(&lookupTab, "tab", "", "tab title to work on (default: the tab in the link #gid, else the first tab)")
 		c.Flags().IntVar(&lookupHeaderRow, "header-row", 1, "sheet row that holds the headers")
 	}
-	sheetFindCmd.Flags().StringVar(&findCol, "col", "", "column to match, by header name or by letter (required)")
-	sheetFindCmd.Flags().StringVar(&findValue, "value", "", "value to match (required)")
-	sheetFindCmd.Flags().BoolVar(&findContains, "contains", false, "match a substring instead of the whole cell")
-	sheetFindCmd.Flags().StringArrayVar(&findShow, "show", nil, "extra column to print, by header name or letter; repeatable")
-	_ = sheetFindCmd.MarkFlagRequired("col")
-	_ = sheetFindCmd.MarkFlagRequired("value")
+	sheetFindCmd.Flags().StringVar(&findCol, "col", "", "column to match, by header name or by letter (with --value)")
+	sheetFindCmd.Flags().StringVar(&findValue, "value", "", "value to match in --col")
+	sheetFindCmd.Flags().BoolVar(&findContains, "contains", false, "match --value as a substring instead of the whole cell")
+	sheetFindCmd.Flags().StringArrayVar(&findShow, "show", nil, "column to print, by header name or letter; repeatable or comma-separated")
+	sheetFindCmd.Flags().StringArrayVar(&findCols, "cols", nil, "same as --show")
+	sheetFindCmd.Flags().StringArrayVar(&findWhere, "where", nil, "<header>=<v>, !=<v> or ~=<v> that a row must meet; repeatable")
+	sheetFindCmd.Flags().IntVar(&findLimit, "limit", 0, "print at most this many rows (0 = all)")
+	sheetFindCmd.Flags().BoolVar(&fullOut, "full", false, "never cut a long cell in the table")
+	sheetFindCmd.MarkFlagsRequiredTogether("col", "value")
 
-	sheetCellCmd.Flags().StringVar(&cellWhere, "where", "", "<header>=<value> that picks the row (required)")
-	sheetCellCmd.Flags().StringVar(&cellCol, "col", "", "column to read or write, by header name or letter (required)")
+	sheetCellCmd.Flags().StringArrayVar(&cellWhere, "where", nil, "<header>=<v> that picks the row; repeatable, all must hold (required)")
+	sheetCellCmd.Flags().StringArrayVar(&cellCol, "col", nil, "column to read or write, by header name or letter; a read takes several, comma-separated or repeated (required)")
 	sheetCellCmd.Flags().StringVar(&cellSet, "set", "", "write this value into the cell instead of reading it")
 	sheetCellCmd.Flags().BoolVar(&cellForce, "force", false, "write --set even when the cell's dropdown does not list the value")
 	_ = sheetCellCmd.MarkFlagRequired("where")
@@ -242,46 +260,69 @@ func runSheetFind(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if findCol == "" && len(findWhere) == 0 {
+		return fmt.Errorf("find needs a condition: --col with --value, or --where")
+	}
+	if findLimit < 0 {
+		return fmt.Errorf("--limit must be 0 or more")
+	}
 	g, err := loadGrid(ref)
 	if err != nil {
 		return err
 	}
-	key, err := g.col(findCol)
+	conds, err := parseConds(g, findWhere)
 	if err != nil {
 		return err
 	}
-	show := make([]int, 0, len(findShow))
-	for _, s := range findShow {
-		i, err := g.col(s)
+	if findCol != "" {
+		key, err := g.col(findCol)
 		if err != nil {
 			return err
 		}
-		show = append(show, i)
+		op := "="
+		if findContains {
+			op = "~="
+		}
+		conds = append([]cond{{col: key, op: op, val: strings.TrimSpace(findValue)}}, conds...)
 	}
+	show, err := g.cols(append(append([]string{}, findShow...), findCols...))
+	if err != nil {
+		return err
+	}
+	key := conds[0].col
 
-	hits := g.match(key, findValue, findContains)
+	hits := g.filter(conds, findLimit)
 	if jsonOut {
+		cols := show
+		if len(cols) == 0 {
+			cols = g.allCols()
+		}
 		out := make([]map[string]any, 0, len(hits))
 		for _, r := range hits {
-			vals := map[string]string{}
-			for i := range g.headers {
-				vals[g.headerName(i)] = g.cell(r, i)
-			}
-			out = append(out, map[string]any{"row": r + 1, "cell": g.a1(r, key), "values": vals})
+			out = append(out, map[string]any{"row": r + 1, "cell": g.a1(r, key), "values": g.record(r, cols)[1:]})
 		}
 		return printJSON(map[string]any{"tab": g.tab, "matches": out})
 	}
 	if len(hits) == 0 {
-		return fmt.Errorf("no row in tab %q has %q in %s", g.tab, findValue, g.headerName(key))
+		return fmt.Errorf("no row in tab %q meets %s", g.tab, describeConds(g, conds))
+	}
+	if len(show) == 0 {
+		seen := map[int]bool{}
+		for _, c := range conds {
+			if !seen[c.col] {
+				seen[c.col] = true
+				show = append(show, c.col)
+			}
+		}
 	}
 	w := tw()
-	head := "ROW\tCELL\t" + g.headerName(key)
+	head := "ROW"
 	for _, i := range show {
 		head += "\t" + g.headerName(i)
 	}
 	fmt.Fprintln(w, head)
 	for _, r := range hits {
-		line := fmt.Sprintf("%d\t%s\t%s", r+1, g.a1(r, key), oneLine(g.cell(r, key)))
+		line := fmt.Sprint(r + 1)
 		for _, i := range show {
 			line += "\t" + oneLine(g.cell(r, i))
 		}
@@ -290,41 +331,63 @@ func runSheetFind(cmd *cobra.Command, args []string) error {
 	return w.Flush()
 }
 
+func describeConds(g *grid, conds []cond) string {
+	parts := make([]string, 0, len(conds))
+	for _, c := range conds {
+		parts = append(parts, fmt.Sprintf("%s%s%q", g.headerName(c.col), c.op, c.val))
+	}
+	return strings.Join(parts, " and ")
+}
+
 func runSheetCell(cmd *cobra.Command, args []string) error {
 	ref, err := mustRef(args[0], glink.KindSheet)
 	if err != nil {
 		return err
 	}
-	keyName, keyValue, ok := strings.Cut(cellWhere, "=")
-	if !ok || strings.TrimSpace(keyName) == "" {
-		return fmt.Errorf("--where takes <header>=<value>, for example --where \"Bug ID=B-007\"")
-	}
 	g, err := loadGrid(ref)
 	if err != nil {
 		return err
 	}
-	key, err := g.col(keyName)
+	conds, err := parseConds(g, cellWhere)
 	if err != nil {
 		return err
 	}
-	target, err := g.col(cellCol)
+	targets, err := g.cols(cellCol)
 	if err != nil {
 		return err
 	}
+	if len(targets) == 0 {
+		return fmt.Errorf("--col names no column")
+	}
+	if len(targets) > 1 && cmd.Flags().Changed("set") {
+		return fmt.Errorf("--set writes one cell, so --col takes one column with it")
+	}
+	key := conds[0].col
 
-	hits := g.match(key, keyValue, false)
+	hits := g.filter(conds, 0)
 	switch {
 	case len(hits) == 0:
-		return fmt.Errorf("no row in tab %q has %q in %s", g.tab, keyValue, g.headerName(key))
+		return fmt.Errorf("no row in tab %q meets %s", g.tab, describeConds(g, conds))
 	case len(hits) > 1:
 		addrs := make([]string, 0, len(hits))
 		for _, r := range hits {
 			addrs = append(addrs, g.a1(r, key))
 		}
-		return fmt.Errorf("%q matches %d rows (%s): narrow the key, gws refuses an ambiguous cell",
-			keyValue, len(hits), strings.Join(addrs, ", "))
+		return fmt.Errorf("%s matches %d rows (%s): narrow the key, gws refuses an ambiguous cell",
+			describeConds(g, conds), len(hits), strings.Join(addrs, ", "))
 	}
 	row := hits[0]
+
+	if len(targets) > 1 {
+		if jsonOut {
+			return printJSON(map[string]any{"tab": g.tab, "row": row + 1, "values": g.record(row, targets)[1:]})
+		}
+		for _, c := range targets {
+			fmt.Printf("%s: %s\n", g.headerName(c), g.cell(row, c))
+		}
+		return nil
+	}
+	target := targets[0]
 	addr := g.a1(row, target)
 	old := g.cell(row, target)
 
@@ -438,11 +501,12 @@ func runSheetTally(cmd *cobra.Command, args []string) error {
 }
 
 // oneLine keeps a table row on one line when a cell holds newlines, which a
-// steps-to-reproduce column usually does.
+// steps-to-reproduce column usually does. The cut is for a terminal only: a
+// pipe or an agent gets the whole value.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")
-	if len(s) > 60 {
-		s = s[:57] + "..."
+	if r := []rune(s); len(r) > 60 && !fullOut && stdoutTTY() {
+		s = string(r[:57]) + "..."
 	}
 	return s
 }

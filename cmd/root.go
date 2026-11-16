@@ -27,7 +27,11 @@ so it reaches one item at a time and only the items shared with your account.`,
 	SilenceUsage: true,
 }
 
-var jsonOut bool
+var (
+	jsonOut   bool
+	prettyOut bool
+	fullOut   bool
+)
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
@@ -36,7 +40,8 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "print the raw fields as JSON")
+	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "print the raw fields as compact JSON")
+	rootCmd.PersistentFlags().BoolVar(&prettyOut, "pretty", false, "indent the --json output for a human reader")
 }
 
 // ctx gives every command one deadline. AfterFunc releases the timer when the
@@ -55,7 +60,10 @@ func ctxLong() (context.Context, context.CancelFunc) {
 
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if prettyOut {
+		enc.SetIndent("", "  ")
+	}
 	return enc.Encode(v)
 }
 
