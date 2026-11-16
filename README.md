@@ -22,6 +22,62 @@ gws keeps its output small, so an agent spends fewer tokens and makes fewer roun
 5. Each record holds `_row`, the sheet row number. Keep it to confirm the row before a write.
 6. `sheet find` and `comment` cut a long cell to 60 characters. The cut happens only on a terminal, and `--full` turns it off.
 
+## Token benchmark
+
+gws and a direct call to the Google API reach the same data through the same API calls. The difference is what the agent must write and read. gws keeps the lookup, the checks and the output shape inside the binary, so the agent context holds less.
+
+### Method
+
+1. The test sheet is a real task tab with 28 rows and 9 columns (11 KB).
+2. "Raw API" is what an agent sends and reads with `curl`. The REST API returns indented JSON by default.
+3. `out` counts the tokens that the agent writes: commands and code. `in` counts the tokens that the agent reads: tool results.
+4. "Weighted" is `in + 5 × out`, because output tokens cost about 5 times more than input tokens.
+5. The counts come from the `o200k_base` tokenizer. Other tokenizers give other counts, but the ratios stay close.
+6. In S3, the dropdown-rule response and the update response are synthetic, with the real API shape. All other outputs are measured.
+
+### Flow: set one cell by key (S3)
+
+```
+Raw API: the agent drives each step              gws: one command
+├─ write token refresh curl        52 out        gws sheet cell <link> --where "Task ID=T-001"
+├─ write tab-title curl            64 out          --col Status --set Done           68 out
+│  └─ read sheet properties       134 in         └─ inside the binary, not in context:
+├─ write values curl               69 out           ├─ Spreadsheets.Get  gid to tab title
+├─ write row-lookup code          126 out           ├─ Values.Get        whole tab
+│  └─ read A1 address              15 in            ├─ key match: 0 or 2+ rows, refuse
+├─ write dropdown-rule curl        74 out           ├─ dropdown check
+│  └─ read dataValidation JSON    187 in            └─ Values.Update     [Sheet write]
+└─ write update curl               94 out        → updated 'Task'!C2 (Status, row 2):
+   └─ read update response         75 in           "Todo" -> "Done"                 22 in
+   = 479 out + 411 in                            = 68 out + 22 in
+```
+
+Both sides make the same 4 Google API calls. With the raw API, the agent also writes the URL quoting, the row lookup and the dropdown compare. A missed check writes a wrong row or a value that is not in the dropdown.
+
+### Results
+
+| # | Scenario | Approach | out | in | Total | % of raw | % of raw, weighted |
+|---|---|---|---|---|---|---|---|
+| 1 | S1: read the whole tab | Raw API (indented JSON) | 185 | 4,329 | 4,514 | 100% | 100% |
+| 2 | | gws, TSV (default) | 52 | 3,516 | 3,568 | **79.0%** | **71.9%** |
+| 3 | | gws `--csv` | 52 | 3,545 | 3,597 | 79.7% | 72.4% |
+| 4 | | gws `--json` (compact) | 52 | 3,657 | 3,709 | 82.2% | 74.6% |
+| 5 | S2: read 3 columns of the open rows | Raw API, the agent reads the full JSON | 185 | 4,329 | 4,514 | 100% | 100% |
+| 6 | | Raw API, the agent writes filter code | 297 | 796 | 1,093 | 24.2% | 43.4% |
+| 7 | | gws, TSV (default) | 70 | 592 | 662 | **14.7%** | **17.9%** |
+| 8 | | gws `--csv` | 70 | 587 | 657 | 14.6% | 17.8% |
+| 9 | | gws `--records` | 72 | 890 | 962 | 21.3% | 23.8% |
+| 10 | S3: set one cell by key | Raw API, the agent writes lookup code | 479 | 411 | 890 | 100% | 100% |
+| 11 | | gws `cell --set` | 68 | 22 | 90 | **10.1%** | **12.9%** |
+
+### What the numbers show
+
+1. Column and row picks save the most. S2 drops from 4,514 to 662 tokens, 85% less. The format choice adds little to that.
+2. Logic in the binary saves the expensive tokens. In S3, most of the raw cost is code that the agent writes. gws replaces it with one command.
+3. On this tab, TSV, CSV and compact JSON differ by less than 4%. TSV stays the default because it needs no quoting and one row is always one line.
+4. `--records` costs about 1.5 times TSV, because each row repeats its keys. Use it when you need `_row` or named fields.
+5. The table does not count retries, extra agent turns, or tool results that the agent reads again on later turns. Each of these adds more to the raw API side.
+
 ## Install
 
 Requires Go 1.26.0, the version on the `go` line of `go.mod`.
