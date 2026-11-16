@@ -1,0 +1,30 @@
+# build output
+/gws
+/gws-*
+*.exe
+*.test
+*.out
+
+# Claude Code worktrees and local session state
+.claude/
+
+# credentials: gws keeps these in the OS keyring, never in the repo
+.env
+.env.*
+!.env.example
+client_secret*.json
+*service-account*.json
+*credentials*.json
+*.pem
+*.p12
+*.key
+
+# files pulled down from Drive while testing
+*.docx
+*.xlsx
+*.pptx
+*.csv
+
+# editor and OS
+.DS_Store
+*.swp
