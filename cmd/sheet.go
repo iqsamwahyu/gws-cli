@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"fmt"
@@ -19,6 +20,7 @@ var sheetCmd = &cobra.Command{Use: "sheet", Short: "Read and edit one Google She
 var (
 	sheetSetCSV    string
 	sheetAppendCSV string
+	getCSV         bool
 	getCols        []string
 	getWhere       []string
 	getLimit       int
@@ -27,14 +29,16 @@ var (
 
 var sheetGetCmd = &cobra.Command{
 	Use:   "get <link> [range]",
-	Short: "Read a range as CSV, or a whole tab with no range",
-	Long: `Read a range as CSV, or a whole tab with no range.
+	Short: "Read a range as TSV, or a whole tab with no range",
+	Long: `Read a range as TSV, or a whole tab with no range.
 
 With a range, the range goes to Google untouched (e.g. Sheet1!A1:D20).
 With no range and a #gid in the link, gws reads that tab whole.
 With no range and no gid, gws reads the first tab and names it on stderr.
 
---json prints the raw ValueRange instead of CSV.
+TSV costs the fewest tokens for an agent. A tab, a new line or a backslash
+inside a cell is written as \t, \n or \\, so one row stays one line.
+--csv prints CSV instead. --json prints the raw ValueRange.
 
 --cols, --where, --limit and --records read the tab by its header row and
 return only what they pick. They take no range; use --tab for another tab.
@@ -93,6 +97,7 @@ func init() {
 	sheetGetCmd.Flags().StringArrayVar(&getWhere, "where", nil, "<header>=<v>, !=<v> or ~=<v> that a row must meet; repeatable, all must hold")
 	sheetGetCmd.Flags().IntVar(&getLimit, "limit", 0, "print at most this many rows (0 = all)")
 	sheetGetCmd.Flags().BoolVar(&getRecords, "records", false, "print JSON objects keyed by header, one per row")
+	sheetGetCmd.Flags().BoolVar(&getCSV, "csv", false, "print CSV instead of TSV")
 	_ = sheetSetCmd.MarkFlagRequired("csv")
 	_ = sheetAppendCmd.MarkFlagRequired("csv")
 
@@ -133,7 +138,7 @@ func runSheetGet(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if ref.GID < 0 {
-			// stdout carries the CSV, so the note about which tab was picked
+			// stdout carries the rows, so the note about which tab was picked
 			// goes to stderr and a pipe stays clean
 			fmt.Fprintf(os.Stderr, "no range and no gid in the link: reading the first tab %q (gws sheet tabs lists them all)\n", title)
 		}
@@ -147,7 +152,7 @@ func runSheetGet(cmd *cobra.Command, args []string) error {
 	if jsonOut {
 		return printJSON(vr)
 	}
-	return writeCSV(vr.Values)
+	return writeRows(vr.Values)
 }
 
 func runSheetGetPicked(ref glink.Ref) error {
@@ -191,7 +196,7 @@ func runSheetGetPicked(ref glink.Ref) error {
 		}
 		table = append(table, line)
 	}
-	return writeCSV(table)
+	return writeRows(table)
 }
 
 func runSheetSet(cmd *cobra.Command, args []string) error {
@@ -395,6 +400,29 @@ func readCSVValues(arg string) ([][]any, error) {
 		out[i] = r
 	}
 	return out, nil
+}
+
+func writeRows(rows [][]any) error {
+	if getCSV {
+		return writeCSV(rows)
+	}
+	return writeTSV(rows)
+}
+
+var tsvEscaper = strings.NewReplacer("\\", `\\`, "\t", `\t`, "\n", `\n`, "\r", `\r`)
+
+func writeTSV(rows [][]any) error {
+	w := bufio.NewWriter(os.Stdout)
+	for _, row := range rows {
+		for i, v := range row {
+			if i > 0 {
+				w.WriteByte('\t')
+			}
+			w.WriteString(tsvEscaper.Replace(fmt.Sprint(v)))
+		}
+		w.WriteByte('\n')
+	}
+	return w.Flush()
 }
 
 func writeCSV(rows [][]any) error {

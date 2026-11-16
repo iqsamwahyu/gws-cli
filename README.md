@@ -15,11 +15,12 @@ gws is a bridge between a terminal, or an AI agent, and Google Workspace: Drive,
 
 gws keeps its output small, so an agent spends fewer tokens and makes fewer round trips.
 
-1. `--json` prints compact JSON. Add `--pretty` for an indented copy that people can read.
-2. `--cols`, `--where`, `--limit` and `--records` return only the columns and rows that the agent asks for.
-3. `--records` and `--json` with a pick flag leave out empty cells. A hand-kept sheet holds many empty cells.
-4. Each record holds `_row`, the sheet row number. Keep it to confirm the row before a write.
-5. `sheet find` and `comment` cut a long cell to 60 characters. The cut happens only on a terminal, and `--full` turns it off.
+1. Table output is TSV by default. TSV has no quotes and no padding, so it costs the fewest tokens. A tab, a new line or a backslash in a cell is written as `\t`, `\n` or `\\`, so one row stays on one line. On a terminal, the tables are aligned for a person.
+2. `--json` is optional and prints compact JSON. Add `--pretty` for an indented copy that people can read. `sheet get --csv` prints CSV.
+3. `--cols`, `--where`, `--limit` and `--records` return only the columns and rows that the agent asks for.
+4. `--records` and `--json` with a pick flag leave out empty cells. A hand-kept sheet holds many empty cells.
+5. Each record holds `_row`, the sheet row number. Keep it to confirm the row before a write.
+6. `sheet find` and `comment` cut a long cell to 60 characters. The cut happens only on a terminal, and `--full` turns it off.
 
 ## Install
 
@@ -80,7 +81,7 @@ Each command takes a link as its first argument. A bare file ID also works for m
 | doc | `doc replace` | Replace every match of a substring. `--match-case` is optional |
 | sheet | `sheet tabs` | List the tabs of a spreadsheet |
 | sheet | `sheet cols` | List the header row with the column letter and index |
-| sheet | `sheet get` | Read a range as CSV. `--cols`, `--where`, `--limit`, `--records` pick rows |
+| sheet | `sheet get` | Read a range as TSV (`--csv`, `--json` optional). `--cols`, `--where`, `--limit`, `--records` pick rows |
 | sheet | `sheet find` | Find rows that match a condition and print their row numbers |
 | sheet | `sheet tally` | Count the rows for each distinct value of one column |
 | sheet | `sheet cell` | Read one cell by key column, or write it with `--set` |
@@ -148,7 +149,7 @@ C       3      Status
 D       4      Priority
 ```
 
-### 3. Read rows as CSV
+### 3. Read rows as TSV
 
 ```bash
 gws sheet get https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit --cols "Task ID,Status" --where Status=Todo
@@ -157,9 +158,9 @@ gws sheet get https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit --cols "Tas
 Output:
 
 ```
-Task ID,Status
-T-001,Todo
-T-004,Todo
+Task ID	Status
+T-001	Todo
+T-004	Todo
 ```
 
 ### 4. Read the same rows as records

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -67,8 +68,18 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
-func tw() *tabwriter.Writer {
-	return tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+type tableWriter interface {
+	io.Writer
+	Flush() error
+}
+
+// tw aligns the columns for a person on a terminal. A pipe or an agent gets
+// plain TSV, because the padding spaces cost tokens and help no parser.
+func tw() tableWriter {
+	if stdoutTTY() {
+		return tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	}
+	return bufio.NewWriter(os.Stdout)
 }
 
 // readInput reads "-" from stdin, "@path" from that file, anything else as the
