@@ -277,3 +277,7 @@ appended to <DOC_ID>
 ```
 
 Quote any argument that holds a space or a comma.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
