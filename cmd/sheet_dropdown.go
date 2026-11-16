@@ -16,10 +16,12 @@ var (
 	dropdownCol     string
 	dropdownSet     string
 	dropdownLenient bool
+	dropdownFrom    string
+	dropdownClear   bool
 )
 
 var sheetDropdownCmd = &cobra.Command{
-	Use:   "dropdown <link> --col <header|letter> [--set <a,b,c>]",
+	Use:   "dropdown <link> --col <header|letter> [--set <a,b,c> | --from <header|letter> | --clear]",
 	Short: "List the values a dropdown column allows, or set them with --set",
 	Long: `List the values a dropdown column allows, or set them with --set.
 
@@ -36,6 +38,10 @@ Caution: chip style, per-value colors and "allow multiple selections" exist
 only in the Sheets UI. The API cannot read or send them, so --set on a column
 that has them drops them. Set them again in the UI after --set.
 
+--from copies the rule of another column onto --col, with every setting the UI
+holds, multi-select and chip colors included. --clear removes the rule from
+--col. Use the two together to move a dropdown that a column shift left behind.
+
 gws sheet cell --set checks the same rule before it writes.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSheetDropdown,
@@ -47,6 +53,9 @@ func init() {
 	sheetDropdownCmd.Flags().StringVar(&dropdownCol, "col", "", "column to read or set, by header name or letter (required)")
 	sheetDropdownCmd.Flags().StringVar(&dropdownSet, "set", "", "comma-separated values: put this list dropdown on the column")
 	sheetDropdownCmd.Flags().BoolVar(&dropdownLenient, "lenient", false, "with --set, mark a value outside the list instead of rejecting it")
+	sheetDropdownCmd.Flags().StringVar(&dropdownFrom, "from", "", "copy the dropdown rule of this column onto --col, UI-only settings included")
+	sheetDropdownCmd.Flags().BoolVar(&dropdownClear, "clear", false, "remove the dropdown rule from --col")
+	sheetDropdownCmd.MarkFlagsMutuallyExclusive("set", "from", "clear")
 	_ = sheetDropdownCmd.MarkFlagRequired("col")
 	sheetCmd.AddCommand(sheetDropdownCmd)
 }
@@ -80,6 +89,16 @@ func runSheetDropdown(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("set") {
 		return setDropdown(svc, ref.ID, g, col, c)
+	}
+	if cmd.Flags().Changed("from") {
+		src, err := g.col(dropdownFrom)
+		if err != nil {
+			return err
+		}
+		return copyDropdown(svc, ref.ID, g, src, col, c)
+	}
+	if dropdownClear {
+		return clearDropdown(svc, ref.ID, g, col, c)
 	}
 	// the grid stops at the last row with a value, but a dropdown is usually set
 	// on empty rows too, so the range runs to the end of the column
@@ -163,6 +182,63 @@ func setDropdown(svc *sheets.Service, id string, g *grid, col int, c context.Con
 	}
 	fmt.Printf("set a dropdown on %s!%s%d:%s (%s): %s\n", quoteTab(g.tab), colLetter(col), lookupHeaderRow+1, colLetter(col),
 		g.headerName(col), strings.Join(list, " | "))
+	return nil
+}
+
+// columnBody is every row of one column below the header, open-ended so rows
+// appended later are covered too.
+func columnBody(sheetID int64, col int) *sheets.GridRange {
+	return &sheets.GridRange{
+		SheetId:          sheetID,
+		StartRowIndex:    int64(lookupHeaderRow),
+		StartColumnIndex: int64(col),
+		EndColumnIndex:   int64(col + 1),
+		ForceSendFields:  []string{"StartColumnIndex"},
+	}
+}
+
+func copyDropdown(svc *sheets.Service, id string, g *grid, src, dst int, c context.Context) error {
+	if src == dst {
+		return fmt.Errorf("--from and --col name the same column")
+	}
+	sheetID, err := tabID(svc, id, g.tab, c)
+	if err != nil {
+		return err
+	}
+	// copyPaste keeps the settings the API cannot express (multi-select, chips)
+	req := &sheets.BatchUpdateSpreadsheetRequest{Requests: []*sheets.Request{{
+		CopyPaste: &sheets.CopyPasteRequest{
+			Source:      columnBody(sheetID, src),
+			Destination: columnBody(sheetID, dst),
+			PasteType:   "PASTE_DATA_VALIDATION",
+		},
+	}}}
+	if _, err := svc.Spreadsheets.BatchUpdate(id, req).Context(c).Do(); err != nil {
+		return gsvc.Explain(err)
+	}
+	if jsonOut {
+		return printJSON(map[string]any{"tab": g.tab, "column": g.headerName(dst), "copied_from": g.headerName(src)})
+	}
+	fmt.Printf("copied the dropdown of %s onto %s\n", g.headerName(src), g.headerName(dst))
+	return nil
+}
+
+func clearDropdown(svc *sheets.Service, id string, g *grid, col int, c context.Context) error {
+	sheetID, err := tabID(svc, id, g.tab, c)
+	if err != nil {
+		return err
+	}
+	// a SetDataValidation with no rule removes the rule
+	req := &sheets.BatchUpdateSpreadsheetRequest{Requests: []*sheets.Request{{
+		SetDataValidation: &sheets.SetDataValidationRequest{Range: columnBody(sheetID, col)},
+	}}}
+	if _, err := svc.Spreadsheets.BatchUpdate(id, req).Context(c).Do(); err != nil {
+		return gsvc.Explain(err)
+	}
+	if jsonOut {
+		return printJSON(map[string]any{"tab": g.tab, "column": g.headerName(col), "cleared": true})
+	}
+	fmt.Printf("removed the dropdown from %s\n", g.headerName(col))
 	return nil
 }
 
