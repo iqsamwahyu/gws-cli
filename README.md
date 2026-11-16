@@ -177,6 +177,23 @@ Output:
 
 The output is one JSON array. Each element is one row. Add `--pretty` to indent it. An empty cell does not appear in its object.
 
+### 4b. A cell that holds a tab, a new line or a backslash
+
+```bash
+gws sheet get https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit --cols "Task ID,Notes" --limit 3
+```
+
+Output (a real tab separates the columns):
+
+```
+Task ID	Notes
+T-001	step 1\tstep 2
+T-002	line one\nline two
+T-003	path C:\\tmp, "quoted"
+```
+
+The T-001 cell holds a real tab, and gws prints it as `\t`. The T-002 cell holds a new line, printed as `\n`. A backslash is doubled. A comma or a quote stays as it is. So a row keeps its column count and stays on one line. Use `--json` to get the exact cell text.
+
 ### 5. Write one cell
 
 ```bash
